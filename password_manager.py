@@ -23,6 +23,11 @@ Flujo:
 
 import os
 import sys
+import time
+import json
+import base64
+import string
+import secrets
 import hashlib
 import sqlite3
 from pathlib import Path
@@ -84,6 +89,7 @@ PBKDF2_ITERATIONS = 480_000      # recomendación OWASP (2023+) para PBKDF2-HMAC
 NONCE_SIZE = 12                  # tamaño estándar de nonce para AES-GCM
 
 DB_PATH = Path(__file__).parent / "vault.db"
+INACTIVIDAD_MAXIMA_SEGUNDOS = 120  # bloquea la sesión tras 2 min sin usar el menú
 
 
 # --------------------------------------------------------------------------
@@ -132,6 +138,79 @@ def descifrar(nonce: bytes, texto_cifrado: bytes, llave: bytes) -> str:
     aesgcm = AESGCM(llave)
     texto_plano = aesgcm.decrypt(nonce, texto_cifrado, None)
     return texto_plano.decode("utf-8")
+
+
+# --------------------------------------------------------------------------
+# Generador de contraseñas seguras + evaluación de fortaleza
+# --------------------------------------------------------------------------
+
+SIMBOLOS = "!@#$%^&*()-_=+[]{}"
+
+
+def generar_password_segura(
+    longitud: int = 16,
+    usar_mayus: bool = True,
+    usar_minus: bool = True,
+    usar_numeros: bool = True,
+    usar_simbolos: bool = True,
+) -> str:
+    """
+    Genera una contraseña aleatoria usando el módulo `secrets`, que usa
+    el generador de números aleatorios del sistema operativo pensado
+    para criptografía (a diferencia de `random`, que NO es seguro para
+    esto). Garantiza al menos un caracter de cada tipo seleccionado.
+    """
+    conjuntos = []
+    if usar_mayus:
+        conjuntos.append(string.ascii_uppercase)
+    if usar_minus:
+        conjuntos.append(string.ascii_lowercase)
+    if usar_numeros:
+        conjuntos.append(string.digits)
+    if usar_simbolos:
+        conjuntos.append(SIMBOLOS)
+
+    if not conjuntos:
+        raise ValueError("Debes seleccionar al menos un tipo de caracter.")
+
+    todos = "".join(conjuntos)
+    if longitud < len(conjuntos):
+        longitud = len(conjuntos)
+
+    # Aseguramos al menos un caracter de cada conjunto elegido
+    password = [secrets.choice(conjunto) for conjunto in conjuntos]
+    password += [secrets.choice(todos) for _ in range(longitud - len(password))]
+    secrets.SystemRandom().shuffle(password)
+    return "".join(password)
+
+
+def evaluar_fortaleza(password: str) -> tuple[str, list[str]]:
+    """
+    Evalúa qué tan fuerte es una contraseña. Devuelve un nivel
+    ("Débil", "Aceptable", "Fuerte") y una lista de razones si le falta
+    algo. No es un análisis criptográfico riguroso (como zxcvbn), pero
+    cubre los criterios básicos: longitud y variedad de caracteres.
+    """
+    problemas = []
+    if len(password) < 8:
+        problemas.append("menos de 8 caracteres")
+    if not any(c.isupper() for c in password):
+        problemas.append("sin mayúsculas")
+    if not any(c.islower() for c in password):
+        problemas.append("sin minúsculas")
+    if not any(c.isdigit() for c in password):
+        problemas.append("sin números")
+    if not any(c in string.punctuation for c in password):
+        problemas.append("sin símbolos")
+
+    if not problemas and len(password) >= 16:
+        nivel = "Fuerte"
+    elif len(problemas) <= 1 and len(password) >= 8:
+        nivel = "Aceptable"
+    else:
+        nivel = "Débil"
+
+    return nivel, problemas
 
 
 # --------------------------------------------------------------------------
@@ -264,6 +343,74 @@ def eliminar_entrada(entrada_id: int):
 
 
 # --------------------------------------------------------------------------
+# Backup: exportar / importar la bóveda completa (sigue cifrada)
+# --------------------------------------------------------------------------
+
+def exportar_backup(ruta: str) -> None:
+    """
+    Exporta el verificador (salt + config) y todas las entradas a un
+    archivo JSON. Los valores siguen cifrados con AES-256-GCM tal como
+    están en la base de datos: el backup NUNCA contiene contraseñas en
+    texto plano, solo se cambia el formato de almacenamiento (bytes ->
+    base64 para que quepan en JSON).
+    """
+    config = obtener_config()
+    if config is None:
+        raise RuntimeError("No hay una bóveda configurada todavía.")
+    salt, nonce_v, cifrado_v = config
+
+    entradas_completas = []
+    for id_, _servicio, _usuario in listar_entradas():
+        servicio, usuario, nonce, cifrado = obtener_entrada(id_)
+        entradas_completas.append({
+            "servicio": servicio,
+            "usuario": usuario,
+            "nonce": base64.b64encode(nonce).decode("ascii"),
+            "password_cifrada": base64.b64encode(cifrado).decode("ascii"),
+        })
+
+    backup = {
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "verificador_nonce": base64.b64encode(nonce_v).decode("ascii"),
+        "verificador_cifrado": base64.b64encode(cifrado_v).decode("ascii"),
+        "entradas": entradas_completas,
+    }
+
+    with open(ruta, "w", encoding="utf-8") as archivo:
+        json.dump(backup, archivo, indent=2, ensure_ascii=False)
+
+
+def importar_backup(ruta: str) -> None:
+    """
+    Reemplaza la bóveda actual (config + entradas) con el contenido de
+    un backup exportado antes. Requiere la misma contraseña maestra que
+    se usó al exportarlo, porque el salt viaja dentro del backup.
+    """
+    with open(ruta, "r", encoding="utf-8") as archivo:
+        backup = json.load(archivo)
+
+    salt = base64.b64decode(backup["salt"])
+    nonce_v = base64.b64decode(backup["verificador_nonce"])
+    cifrado_v = base64.b64decode(backup["verificador_cifrado"])
+
+    conn = conectar()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM config")
+    cur.execute("DELETE FROM entradas")
+    conn.commit()
+    conn.close()
+
+    guardar_config(salt, nonce_v, cifrado_v)
+    for entrada in backup["entradas"]:
+        crear_entrada(
+            entrada["servicio"],
+            entrada["usuario"],
+            base64.b64decode(entrada["nonce"]),
+            base64.b64decode(entrada["password_cifrada"]),
+        )
+
+
+# --------------------------------------------------------------------------
 # CLI: login y menú
 # --------------------------------------------------------------------------
 
@@ -343,8 +490,58 @@ def cambiar_contrasena_maestra(llave_actual: bytes) -> bytes:
     return nueva_llave
 
 
+def revisar_seguridad_de_entradas(llave: bytes) -> None:
+    """
+    Descifra todas las entradas guardadas (solo en memoria, nunca se
+    imprime la contraseña completa salvo que el usuario ya la vea con
+    la opción 3) y reporta cuáles son débiles y cuáles se repiten entre
+    distintos servicios.
+    """
+    entradas = listar_entradas()
+    if not entradas:
+        print("No hay credenciales guardadas para revisar.\n")
+        return
+
+    reportes_debiles = []
+    passwords_vistas = {}  # password_texto_plano -> lista de "servicio (usuario)"
+
+    for id_, servicio, usuario in entradas:
+        _, _, nonce, cifrado = obtener_entrada(id_)
+        password = descifrar(nonce, cifrado, llave)
+        nivel, problemas = evaluar_fortaleza(password)
+        if nivel != "Fuerte":
+            razon = ", ".join(problemas) if problemas else "longitud corta"
+            reportes_debiles.append(f"  - {servicio} ({usuario}): {nivel} — {razon}")
+        etiqueta = f"{servicio} ({usuario})"
+        passwords_vistas.setdefault(password, []).append(etiqueta)
+
+    reutilizadas = {pw: lugares for pw, lugares in passwords_vistas.items() if len(lugares) > 1}
+
+    print("\n=== Revisión de seguridad ===")
+    if reportes_debiles:
+        print(f"\nContraseñas débiles o aceptables ({len(reportes_debiles)}):")
+        for linea in reportes_debiles:
+            print(linea)
+    else:
+        print("\nNinguna contraseña débil detectada.")
+
+    if reutilizadas:
+        print(f"\nContraseñas reutilizadas en más de un servicio ({len(reutilizadas)}):")
+        for lugares in reutilizadas.values():
+            print(f"  - Usada en: {', '.join(lugares)}")
+    else:
+        print("\nNinguna contraseña reutilizada.")
+    print()
+
+
 def menu_principal(llave: bytes):
+    ultima_actividad = time.time()
     while True:
+        if time.time() - ultima_actividad > INACTIVIDAD_MAXIMA_SEGUNDOS:
+            print(f"\nSesión bloqueada tras {INACTIVIDAD_MAXIMA_SEGUNDOS}s de inactividad.")
+            print("Vuelve a ingresar tu contraseña maestra para continuar.\n")
+            llave = iniciar_sesion()
+
         print("""
 --- Gestor de Contraseñas ---
 1. Agregar nueva credencial
@@ -352,10 +549,15 @@ def menu_principal(llave: bytes):
 3. Ver una contraseña específica
 4. Editar una contraseña
 5. Eliminar una credencial
-6. Cambiar contraseña maestra
-7. Salir
+6. Generar contraseña segura
+7. Revisar contraseñas débiles o reutilizadas
+8. Exportar backup cifrado
+9. Importar backup cifrado
+10. Cambiar contraseña maestra
+11. Salir
 """)
         opcion = input("Elige una opción: ").strip()
+        ultima_actividad = time.time()
 
         if opcion == "1":
             agregar_credencial(llave)
@@ -368,18 +570,83 @@ def menu_principal(llave: bytes):
         elif opcion == "5":
             eliminar_credencial()
         elif opcion == "6":
-            llave = cambiar_contrasena_maestra(llave)
+            generar_contrasena_interactivo()
         elif opcion == "7":
+            revisar_seguridad_de_entradas(llave)
+        elif opcion == "8":
+            exportar_backup_interactivo()
+        elif opcion == "9":
+            nueva_llave = importar_backup_interactivo()
+            if nueva_llave is not None:
+                llave = nueva_llave
+        elif opcion == "10":
+            llave = cambiar_contrasena_maestra(llave)
+        elif opcion == "11":
             print("Hasta luego.")
             break
         else:
             print("Opción inválida.")
 
 
+def generar_contrasena_interactivo():
+    print("\n=== Generador de contraseña segura ===")
+    entrada_longitud = input("Longitud deseada (Enter para 16): ").strip()
+    try:
+        longitud = int(entrada_longitud) if entrada_longitud else 16
+    except ValueError:
+        longitud = 16
+    usar_simbolos = input("¿Incluir símbolos? (S/n): ").strip().lower() != "n"
+
+    password = generar_password_segura(longitud=longitud, usar_simbolos=usar_simbolos)
+    nivel, _ = evaluar_fortaleza(password)
+    print(f"\nContraseña generada: {password}")
+    print(f"Fortaleza: {nivel}\n")
+
+
+def exportar_backup_interactivo():
+    print("\n=== Exportar backup cifrado ===")
+    ruta = input("Nombre del archivo (Enter para 'backup.json'): ").strip() or "backup.json"
+    try:
+        exportar_backup(ruta)
+        print(f"Backup exportado a '{ruta}'. Sigue cifrado con tu contraseña maestra actual.\n")
+    except Exception as error:
+        print(f"No se pudo exportar el backup: {error}\n")
+
+
+def importar_backup_interactivo():
+    print("\n=== Importar backup cifrado ===")
+    ruta = input("Ruta del archivo de backup a importar: ").strip()
+    if not Path(ruta).exists():
+        print("No se encontró ese archivo.\n")
+        return None
+    confirmar = input(
+        "Esto REEMPLAZA toda tu bóveda actual con el contenido del backup. "
+        "¿Continuar? (s/n): "
+    ).strip().lower()
+    if confirmar != "s":
+        print("Importación cancelada.\n")
+        return None
+
+    importar_backup(ruta)
+    print("Backup importado. Ingresa la contraseña maestra que usaste al exportarlo.\n")
+    return iniciar_sesion()
+
+
 def agregar_credencial(llave: bytes):
     servicio = input("Servicio (ej. Gmail, Facebook): ").strip()
     usuario = input("Usuario o correo: ").strip()
-    password = pedir_password_oculta("Contraseña a guardar: ")
+
+    generar = input("¿Generar una contraseña segura automáticamente? (s/N): ").strip().lower()
+    if generar == "s":
+        password = generar_password_segura()
+        print(f"Contraseña generada: {password}")
+    else:
+        password = pedir_password_oculta("Contraseña a guardar: ")
+        nivel, problemas = evaluar_fortaleza(password)
+        if nivel != "Fuerte":
+            razon = ", ".join(problemas) if problemas else "longitud corta"
+            print(f"Aviso: fortaleza '{nivel}' ({razon}). Puedes guardarla igual si quieres.")
+
     nonce, cifrado = cifrar(password, llave)
     crear_entrada(servicio, usuario, nonce, cifrado)
     print("Credencial guardada.\n")
@@ -435,8 +702,8 @@ def eliminar_credencial():
     except ValueError:
         print("ID inválido.\n")
         return
-    confirmar = input("¿Seguro que quieres eliminarla? (si/no): ").strip().lower()
-    if confirmar == "si":
+    confirmar = input("¿Seguro que quieres eliminarla? (s/n): ").strip().lower()
+    if confirmar == "s":
         eliminar_entrada(entrada_id)
         print("Credencial eliminada.\n")
 
