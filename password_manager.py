@@ -88,7 +88,16 @@ KEY_SIZE = 32                    # 256 bits, requerido por AES-256
 PBKDF2_ITERATIONS = 480_000      # recomendación OWASP (2023+) para PBKDF2-HMAC-SHA256
 NONCE_SIZE = 12                  # tamaño estándar de nonce para AES-GCM
 
-DB_PATH = Path(__file__).parent / "vault.db"
+# Cuando el programa corre normal (python password_manager.py), __file__
+# apunta a la carpeta del script. Cuando corre empaquetado como .exe con
+# PyInstaller, sys.frozen existe y hay que usar la carpeta del ejecutable
+# en vez de una carpeta temporal que PyInstaller borra al cerrar.
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
+
+DB_PATH = BASE_DIR / "vault.db"
 INACTIVIDAD_MAXIMA_SEGUNDOS = 120  # bloquea la sesión tras 2 min sin usar el menú
 
 
@@ -595,7 +604,7 @@ def generar_contrasena_interactivo():
         longitud = int(entrada_longitud) if entrada_longitud else 16
     except ValueError:
         longitud = 16
-    usar_simbolos = input("¿Incluir símbolos? (S/n): ").strip().lower() != "n"
+    usar_simbolos = input("¿Incluir símbolos? (si/no): ").strip().lower() != "no"
 
     password = generar_password_segura(longitud=longitud, usar_simbolos=usar_simbolos)
     nivel, _ = evaluar_fortaleza(password)
@@ -621,9 +630,9 @@ def importar_backup_interactivo():
         return None
     confirmar = input(
         "Esto REEMPLAZA toda tu bóveda actual con el contenido del backup. "
-        "¿Continuar? (s/n): "
+        "¿Continuar? (si/no): "
     ).strip().lower()
-    if confirmar != "s":
+    if confirmar != "si":
         print("Importación cancelada.\n")
         return None
 
@@ -636,8 +645,8 @@ def agregar_credencial(llave: bytes):
     servicio = input("Servicio (ej. Gmail, Facebook): ").strip()
     usuario = input("Usuario o correo: ").strip()
 
-    generar = input("¿Generar una contraseña segura automáticamente? (s/N): ").strip().lower()
-    if generar == "s":
+    generar = input("¿Generar una contraseña segura automáticamente? (si/no): ").strip().lower()
+    if generar == "si":
         password = generar_password_segura()
         print(f"Contraseña generada: {password}")
     else:
@@ -702,8 +711,8 @@ def eliminar_credencial():
     except ValueError:
         print("ID inválido.\n")
         return
-    confirmar = input("¿Seguro que quieres eliminarla? (s/n): ").strip().lower()
-    if confirmar == "s":
+    confirmar = input("¿Seguro que quieres eliminarla? (si/no): ").strip().lower()
+    if confirmar == "si":
         eliminar_entrada(entrada_id)
         print("Credencial eliminada.\n")
 
