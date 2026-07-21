@@ -8,6 +8,10 @@ usa esa llave para cifrar/descifrar cada credencial guardada con
 Parte de un portafolio de ciberseguridad orientado a hacer estas
 herramientas accesibles para comunidades hispanohablantes.
 
+## Demo
+
+![Demo del Gestor de Contraseñas](assets/demo.gif)
+
 ## Por qué lo hice
 
 Quería entender el cifrado más allá de la teoría: no solo saber que
@@ -47,7 +51,20 @@ te avisa activamente si alguna es débil o está repetida.
    menú, la sesión se bloquea y hay que volver a ingresar la
    contraseña maestra.
 
-## Instalación y uso
+## Descargar la app (Windows, sin instalar Python)
+
+Si solo quieres usarlo, sin tocar código:
+
+1. Ve a la sección [Releases](https://github.com/AFBE10/password-manager/releases) de este repo.
+2. Descarga `GestorContrasenas.exe` de la versión más reciente.
+3. Colócalo en cualquier carpeta y ábrelo con doble clic.
+
+No necesita Python ni ninguna instalación — es un ejecutable standalone.
+La primera vez que lo corras te pedirá crear una contraseña maestra, y
+se creará un archivo `vault.db` en la misma carpeta donde esté el
+`.exe` (ahí vive tu bóveda cifrada).
+
+## Instalación y uso (para desarrolladores)
 
 ```bash
 git clone https://github.com/AFBE10/password-manager.git
@@ -63,6 +80,15 @@ python password_manager.py
 La primera vez que lo corras te pedirá crear una contraseña maestra.
 Cada persona que clone el repo genera su propia bóveda (`vault.db`)
 vacía y local — nadie hereda credenciales de otra instalación.
+
+## Generar tu propio ejecutable
+
+```bash
+pip install pyinstaller
+python -m PyInstaller --onefile --console --name GestorContrasenas password_manager.py
+```
+
+El `.exe` queda en `dist/GestorContrasenas.exe`.
 
 ## Correr los tests
 
@@ -84,6 +110,8 @@ password-manager/
 ├── password_manager.py       # Todo el programa: cripto, base de datos y CLI
 ├── tests/
 │   └── test_password_manager.py
+├── assets/
+│   └── demo.gif
 ├── requirements.txt
 ├── .gitignore
 ├── LICENSE
@@ -127,4 +155,6 @@ password-manager/
 - [x] Exportación cifrada (backup) y reimportación
 - [x] Detección de contraseñas reutilizadas o débiles
 - [x] Bloqueo automático tras inactividad
-- [ ] Grabar GIF de demo de 10-15s para este README
+- [x] Ejecutable standalone (.exe) vía PyInstaller
+- [x] Publicar el primer Release en GitHub con el .exe
+- [x] Grabar y subir el GIF de demo
